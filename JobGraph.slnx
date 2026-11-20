@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="JobGraph.Test/JobGraph.Test.csproj" />
+  <Project Path="JobGraph/JobGraph.csproj" />
+</Solution>
