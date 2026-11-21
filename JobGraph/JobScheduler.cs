@@ -76,7 +76,14 @@ public sealed class JobScheduler
         
         while (readyQueue.Count > 0 || running.Count > 0)
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            if (cancellationToken.IsCancellationRequested)
+            {
+                if (running.Count > 0)
+                {
+                    await Task.WhenAll(running);
+                }
+                cancellationToken.ThrowIfCancellationRequested();
+            }
             while (running.Count < MaxConcurrency && readyQueue.Count > 0)
             {
                 var job = readyQueue.Dequeue();
@@ -110,7 +117,7 @@ public sealed class JobScheduler
         Exception? exception = null;
         try
         {
-            await job.Run(cancellationToken);
+            await Task.Run(() => job.Run(cancellationToken), cancellationToken);
         }
         catch (Exception e)
         {
