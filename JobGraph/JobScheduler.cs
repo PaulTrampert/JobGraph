@@ -1,6 +1,3 @@
-using System.Collections;
-using System.Collections.Concurrent;
-
 namespace JobGraph;
 
 /// <summary>
@@ -18,7 +15,7 @@ public sealed class JobScheduler
         if (maxConcurrency < 1)
         {
             throw new ArgumentOutOfRangeException(
-                nameof(maxConcurrency), 
+                nameof(maxConcurrency),
                 $"{nameof(maxConcurrency)} must be greater than 0");
         }
         MaxConcurrency = maxConcurrency;
@@ -75,7 +72,7 @@ public sealed class JobScheduler
             }
         }
 
-        var running = new List<Task<(Job, Exception?)>>();
+        var running = new HashSet<Task<(Job, Exception?)>>();
         
         while (readyQueue.Count > 0 || running.Count > 0)
         {
@@ -87,9 +84,8 @@ public sealed class JobScheduler
             }
 
             var completedTask = await Task.WhenAny(running);
-            var completedJob = completedTask.Result.Item1;
-            var completedException = completedTask.Result.Item2;
-            if (!running.Remove(completedTask)) continue;
+            running.Remove(completedTask);
+            var (completedJob, completedException) = await completedTask;
             if (completedException != null)
             {
                 failedJobs.Add(completedJob.Name, completedException);
@@ -109,7 +105,7 @@ public sealed class JobScheduler
         return new ScheduleResult(completedJobs, failedJobs, [.. jobDegrees.Keys]);
     }
 
-    private async Task<(Job, Exception?)> RunJob(Job job, CancellationToken cancellationToken)
+    private static async Task<(Job, Exception?)> RunJob(Job job, CancellationToken cancellationToken)
     {
         Exception? exception = null;
         try
@@ -124,7 +120,7 @@ public sealed class JobScheduler
         return (job, exception);
     }
 
-    private void CheckCycles(Job job, Dictionary<string, Job> jobsByName, HashSet<string>? visiting = null, HashSet<string>? done = null)
+    private static void CheckCycles(Job job, Dictionary<string, Job> jobsByName, HashSet<string>? visiting = null, HashSet<string>? done = null)
     {
         visiting ??= new HashSet<string>();
         done ??= new HashSet<string>();
@@ -144,41 +140,5 @@ public sealed class JobScheduler
 
         visiting.Remove(job.Name);
         done.Add(job.Name);
-    }
-    
-    
-
-    private class JobQueue
-    {
-        private readonly Queue<Job> _queue = new();
-        private readonly HashSet<string> _queuedJobs = new();
-
-        public IReadOnlySet<string> QueuedJobs => _queuedJobs;
-        
-        public void Enqueue(Job job)
-        {
-            if (_queuedJobs.Contains(job.Name)) return;
-            _queue.Enqueue(job);
-            _queuedJobs.Add(job.Name);
-        }
-        
-        public bool TryDequeue(out Job? job)
-        {
-            if (!_queue.TryDequeue(out job)) return false;
-            
-            _queuedJobs.Remove(job.Name);
-            return true;
-
-        }
-
-        public bool HasJob(Job job)
-        {
-            return HasJob(job.Name);
-        }
-
-        public bool HasJob(string name)
-        {
-            return QueuedJobs.Contains(name);
-        }
     }
 }
