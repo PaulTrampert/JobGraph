@@ -1,4 +1,7 @@
 <Solution>
+  <Folder Name="/SolutionItems/">
+    <File Path="README.md" />
+  </Folder>
   <Project Path="JobGraph.Test/JobGraph.Test.csproj" />
   <Project Path="JobGraph/JobGraph.csproj" />
 </Solution>

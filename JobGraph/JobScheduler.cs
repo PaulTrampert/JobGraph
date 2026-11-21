@@ -1,3 +1,6 @@
+using System.Collections;
+using System.Collections.Concurrent;
+
 namespace JobGraph;
 
 /// <summary>
@@ -12,6 +15,12 @@ public sealed class JobScheduler
     /// </param>
     public JobScheduler(int maxConcurrency = int.MaxValue)
     {
+        if (maxConcurrency < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxConcurrency), 
+                $"{nameof(maxConcurrency)} must be greater than 0");
+        }
         MaxConcurrency = maxConcurrency;
     }
 
@@ -33,8 +42,143 @@ public sealed class JobScheduler
     ///   cancelled, no new job starts, and this method throws <see cref="OperationCanceledException"/>.</item>
     /// </list>
     /// </summary>
-    public Task<ScheduleResult> RunAsync(IEnumerable<Job> jobs, CancellationToken cancellationToken = default)
+    public async Task<ScheduleResult> RunAsync(IEnumerable<Job> jobs, CancellationToken cancellationToken = default)
     {
-        throw new NotImplementedException();
+        var completedJobs = new List<string>();
+        var failedJobs = new Dictionary<string, Exception>();
+        var toSchedule = jobs.ToList();
+        var jobsByName = toSchedule.ToDictionary(j => j.Name);
+        var jobsByDependent = new Dictionary<string, List<string>>();
+        var jobDegrees = new Dictionary<string, int>();
+        var readyQueue = new Queue<Job>();
+        foreach (var job in toSchedule)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CheckCycles(job, jobsByName);
+            if (job.DependsOn.Count > 0)
+            {
+                jobDegrees.Add(job.Name, job.DependsOn.Count);
+                foreach (var dep in job.DependsOn)
+                {
+                    if (!jobsByDependent.TryGetValue(dep, out var value))
+                    {
+                        value = [];
+                        jobsByDependent.Add(dep, value);
+                    }
+
+                    value.Add(job.Name);
+                }
+            }
+            else
+            {
+                readyQueue.Enqueue(job);
+            }
+        }
+
+        var running = new List<Task<(Job, Exception?)>>();
+        
+        while (readyQueue.Count > 0 || running.Count > 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            while (running.Count < MaxConcurrency && readyQueue.Count > 0)
+            {
+                var job = readyQueue.Dequeue();
+                running.Add(RunJob(job, cancellationToken));
+            }
+
+            var completedTask = await Task.WhenAny(running);
+            var completedJob = completedTask.Result.Item1;
+            var completedException = completedTask.Result.Item2;
+            if (!running.Remove(completedTask)) continue;
+            if (completedException != null)
+            {
+                failedJobs.Add(completedJob.Name, completedException);
+                continue;
+            }
+            completedJobs.Add(completedJob.Name);
+            if (!jobsByDependent.Remove(completedJob.Name, out var jobsToUnblock)) continue;
+            foreach (var jobToUnblock in jobsToUnblock)
+            {
+                jobDegrees[jobToUnblock]--;
+                if (jobDegrees[jobToUnblock] != 0) continue;
+                jobDegrees.Remove(jobToUnblock);
+                readyQueue.Enqueue(jobsByName[jobToUnblock]);
+            }
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        return new ScheduleResult(completedJobs, failedJobs, [.. jobDegrees.Keys]);
+    }
+
+    private async Task<(Job, Exception?)> RunJob(Job job, CancellationToken cancellationToken)
+    {
+        Exception? exception = null;
+        try
+        {
+            await job.Run(cancellationToken);
+        }
+        catch (Exception e)
+        {
+            exception = e;
+        }
+
+        return (job, exception);
+    }
+
+    private void CheckCycles(Job job, Dictionary<string, Job> jobsByName, HashSet<string>? visiting = null, HashSet<string>? done = null)
+    {
+        visiting ??= new HashSet<string>();
+        done ??= new HashSet<string>();
+        if (done.Contains(job.Name)) return;
+        if (!visiting.Add(job.Name))
+        {
+            throw new DependencyCycleException($"Dependency cycled detected in {job.Name}: [{string.Join(", ", visiting)}, {job.Name}]");
+        }
+        foreach (var dependencyName in job.DependsOn)
+        {
+            if (!jobsByName.TryGetValue(dependencyName, out var dependency))
+            {
+                throw new UnknownDependencyException(job.Name, dependencyName);
+            }
+            CheckCycles(dependency, jobsByName, visiting, done);
+        }
+
+        visiting.Remove(job.Name);
+        done.Add(job.Name);
+    }
+    
+    
+
+    private class JobQueue
+    {
+        private readonly Queue<Job> _queue = new();
+        private readonly HashSet<string> _queuedJobs = new();
+
+        public IReadOnlySet<string> QueuedJobs => _queuedJobs;
+        
+        public void Enqueue(Job job)
+        {
+            if (_queuedJobs.Contains(job.Name)) return;
+            _queue.Enqueue(job);
+            _queuedJobs.Add(job.Name);
+        }
+        
+        public bool TryDequeue(out Job? job)
+        {
+            if (!_queue.TryDequeue(out job)) return false;
+            
+            _queuedJobs.Remove(job.Name);
+            return true;
+
+        }
+
+        public bool HasJob(Job job)
+        {
+            return HasJob(job.Name);
+        }
+
+        public bool HasJob(string name)
+        {
+            return QueuedJobs.Contains(name);
+        }
     }
 }
