@@ -48,10 +48,11 @@ public sealed class JobScheduler
         var jobsByDependent = new Dictionary<string, List<string>>();
         var jobDegrees = new Dictionary<string, int>();
         var readyQueue = new Queue<Job>();
+        var checkCyclesDone = new HashSet<string>();
         foreach (var job in toSchedule)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            CheckCycles(job, jobsByName);
+            CheckCycles(job, jobsByName, checkCyclesDone);
             if (job.DependsOn.Count > 0)
             {
                 jobDegrees.Add(job.Name, job.DependsOn.Count);
@@ -127,10 +128,9 @@ public sealed class JobScheduler
         return (job, exception);
     }
 
-    private static void CheckCycles(Job job, Dictionary<string, Job> jobsByName, HashSet<string>? visiting = null, HashSet<string>? done = null)
+    private static void CheckCycles(Job job, Dictionary<string, Job> jobsByName, HashSet<string> done, HashSet<string>? visiting = null)
     {
         visiting ??= new HashSet<string>();
-        done ??= new HashSet<string>();
         if (done.Contains(job.Name)) return;
         if (!visiting.Add(job.Name))
         {
@@ -142,7 +142,7 @@ public sealed class JobScheduler
             {
                 throw new UnknownDependencyException(job.Name, dependencyName);
             }
-            CheckCycles(dependency, jobsByName, visiting, done);
+            CheckCycles(dependency, jobsByName, done, visiting);
         }
 
         visiting.Remove(job.Name);
