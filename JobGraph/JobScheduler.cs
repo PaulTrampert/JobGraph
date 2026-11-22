@@ -1,3 +1,7 @@
+using System.Collections;
+using System.Collections.Immutable;
+using System.Threading.Channels;
+
 namespace JobGraph;
 
 /// <summary>
@@ -41,79 +45,50 @@ public sealed class JobScheduler
     /// </summary>
     public async Task<ScheduleResult> RunAsync(IEnumerable<Job> jobs, CancellationToken cancellationToken = default)
     {
-        var completedJobs = new List<string>();
-        var failedJobs = new Dictionary<string, Exception>();
-        var toSchedule = jobs.ToList();
-        var jobsByName = toSchedule.ToDictionary(j => j.Name);
-        var jobsByDependent = new Dictionary<string, List<string>>();
-        var jobDegrees = new Dictionary<string, int>();
-        var readyQueue = new Queue<Job>();
-        var checkCyclesDone = new HashSet<string>();
-        foreach (var job in toSchedule)
+        var jobCollection = new JobCollection(jobs);
+        var scheduleValidation = new SchedulingState(jobCollection);
+        while (scheduleValidation.HasNext)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            CheckCycles(job, jobsByName, checkCyclesDone);
-            if (job.DependsOn.Count > 0)
-            {
-                jobDegrees.Add(job.Name, job.DependsOn.Count);
-                foreach (var dep in job.DependsOn)
-                {
-                    if (!jobsByDependent.TryGetValue(dep, out var value))
-                    {
-                        value = [];
-                        jobsByDependent.Add(dep, value);
-                    }
-
-                    value.Add(job.Name);
-                }
-            }
-            else
-            {
-                readyQueue.Enqueue(job);
-            }
+            var job = scheduleValidation.StartNext();
+            scheduleValidation.Complete(job);
         }
 
-        var running = new HashSet<Task<(Job, Exception?)>>();
-        
-        while (readyQueue.Count > 0 || running.Count > 0)
+        if (scheduleValidation.Unstarted().Any())
         {
-            if (cancellationToken.IsCancellationRequested)
+            var failingJobName = scheduleValidation.Unstarted().First();
+            jobCollection.TryGetByName(failingJobName, out var failingJob);
+            
+            // This should always throw, if we get here a cycle must exist
+            CheckCycles(failingJob, jobCollection);
+        }
+
+        var runState = new SchedulingState(jobCollection);
+        var completions = Channel.CreateUnbounded<(Job, Exception?)>(
+            new UnboundedChannelOptions { SingleReader = true }
+        );
+
+        while (!runState.Done)
+        {
+            while (!cancellationToken.IsCancellationRequested 
+                   && runState.NumRunning < MaxConcurrency 
+                   && runState.HasNext)
             {
-                if (running.Count > 0)
-                {
-                    await Task.WhenAll(running);
-                }
-                cancellationToken.ThrowIfCancellationRequested();
-            }
-            while (running.Count < MaxConcurrency && readyQueue.Count > 0)
-            {
-                var job = readyQueue.Dequeue();
-                running.Add(RunJob(job, cancellationToken));
+                var toStart = runState.StartNext()!;
+                _ = RunJob(toStart, completions, cancellationToken);
             }
 
-            var completedTask = await Task.WhenAny(running);
-            running.Remove(completedTask);
-            var (completedJob, completedException) = await completedTask;
-            if (completedException != null)
-            {
-                failedJobs.Add(completedJob.Name, completedException);
-                continue;
-            }
-            completedJobs.Add(completedJob.Name);
-            if (!jobsByDependent.Remove(completedJob.Name, out var jobsToUnblock)) continue;
-            foreach (var jobToUnblock in jobsToUnblock)
-            {
-                jobDegrees[jobToUnblock]--;
-                if (jobDegrees[jobToUnblock] != 0) continue;
-                jobDegrees.Remove(jobToUnblock);
-                readyQueue.Enqueue(jobsByName[jobToUnblock]);
-            }
+            if (runState.NumRunning == 0) break;
+
+            var (doneJob, exception) = await completions.Reader.ReadAsync(cancellationToken);
+            if (exception != null) runState.Fail(doneJob, exception);
+            else runState.Complete(doneJob);
         }
-        cancellationToken.ThrowIfCancellationRequested();
-        return new ScheduleResult(completedJobs, failedJobs, [.. jobDegrees.Keys]);
+
+        return runState.GetResult();
     }
 
-    private static async Task<(Job, Exception?)> RunJob(Job job, CancellationToken cancellationToken)
+    private static async Task RunJob(Job job, ChannelWriter<(Job, Exception?)> resultWriter, CancellationToken cancellationToken)
     {
         Exception? exception = null;
         try
@@ -125,27 +100,171 @@ public sealed class JobScheduler
             exception = e;
         }
 
-        return (job, exception);
+        await resultWriter.WriteAsync((job, exception), CancellationToken.None);
     }
 
-    private static void CheckCycles(Job job, Dictionary<string, Job> jobsByName, HashSet<string> done, HashSet<string>? visiting = null)
+    private static void CheckCycles(Job job, JobCollection jobs)
     {
-        visiting ??= new HashSet<string>();
-        if (done.Contains(job.Name)) return;
-        if (!visiting.Add(job.Name))
+        var visiting = new HashSet<string>([job.Name]);
+        var done = new HashSet<string>();
+        var chain = new Stack<(Job, IEnumerator<string>)>([(job, job.DependsOn.GetEnumerator())]);
+        try
         {
-            throw new DependencyCycleException($"Dependency cycled detected in {job.Name}: [{string.Join(", ", visiting)}, {job.Name}]");
-        }
-        foreach (var dependencyName in job.DependsOn)
-        {
-            if (!jobsByName.TryGetValue(dependencyName, out var dependency))
+            while (chain.Count > 0)
             {
-                throw new UnknownDependencyException(job.Name, dependencyName);
+                var (current, deps) = chain.Peek();
+                if (deps.MoveNext())
+                {
+                    if (!jobs.TryGetByName(deps.Current, out var dep))
+                        throw new UnknownDependencyException(current.Name, deps.Current);
+                    if (done.Contains(dep.Name)) continue;
+                    if (visiting.Contains(dep.Name))
+                    {
+                        throw new DependencyCycleException($"Dependency cycle detected in {job.Name}: " +
+                                                           $"[{string.Join(", ", chain.Select(j => j.Item1.Name))}, {dep.Name}]");
+                    }
+
+                    visiting.Add(dep.Name);
+                    chain.Push((dep, dep.DependsOn.GetEnumerator()));
+                }
+                else
+                {
+                    chain.Pop();
+                    deps.Dispose();
+                    visiting.Remove(current.Name);
+                    done.Add(current.Name);
+                }
             }
-            CheckCycles(dependency, jobsByName, done, visiting);
+        }
+        finally
+        {
+            while (chain.Count > 0)
+            {
+                var (_, deps) = chain.Pop();
+                deps.Dispose();
+            }
+        }
+    }
+
+    private class JobCollection : IEnumerable<Job>
+    {
+        private readonly IReadOnlyList<Job> _jobs;
+        private readonly IReadOnlyDictionary<string, Job> _jobsByName;
+        private readonly IReadOnlyDictionary<string, IReadOnlyList<string>> _jobsByDependency;
+
+        public JobCollection(IEnumerable<Job> jobs)
+        {
+            _jobs = [.. jobs];
+            var jobsByName = new Dictionary<string, Job>();
+            var jobsByDependency = new Dictionary<string, List<string>>();
+            foreach (var job in _jobs)
+            {
+                jobsByName.Add(job.Name, job);
+                foreach (var dep in job.DependsOn)
+                {
+                    if (!jobsByDependency.TryGetValue(dep, out var dependents))
+                    {
+                        jobsByDependency.Add(dep, dependents = []);
+                    }
+                    dependents.Add(job.Name);
+                }
+            }
+            _jobsByName = jobsByName;
+            _jobsByDependency = jobsByDependency.ToDictionary(kv => kv.Key, IReadOnlyList<string> (kv) => kv.Value);
         }
 
-        visiting.Remove(job.Name);
-        done.Add(job.Name);
+        public IEnumerable<Job> GetDependents(string jobName)
+        {
+            if (!_jobsByDependency.TryGetValue(jobName, out var dependents))
+                return [];
+            return dependents.Select(d => _jobsByName[d]);
+        }
+
+        public IEnumerator<Job> GetEnumerator() =>
+            _jobs.GetEnumerator();
+
+        IEnumerator IEnumerable.GetEnumerator()
+        {
+            return GetEnumerator();
+        }
+        
+        public bool TryGetByName(string jobName, out Job job)
+        {
+            return _jobsByName.TryGetValue(jobName, out job);
+        }
+    }
+
+    private class SchedulingState
+    {
+        private readonly JobCollection _jobs;
+        private readonly Dictionary<string, int> _jobDegrees = new();
+        private readonly HashSet<string> _running = new();
+        private readonly Queue<Job> _readyQueue = new();
+        private readonly HashSet<string> _completedJobs = new();
+        private readonly Dictionary<string, Exception> _failedJobs = new();
+
+        public bool HasNext => _readyQueue.Count > 0;
+        public int NumRunning => _running.Count;
+
+        public bool Done => _readyQueue.Count == 0 && _running.Count == 0;
+
+        public SchedulingState(JobCollection jobs)
+        {
+            _jobs = jobs;
+            foreach (var job in _jobs)
+            {
+                if (job.DependsOn.Count == 0)
+                {
+                    _readyQueue.Enqueue(job);
+                }
+                else
+                {
+                    _jobDegrees.Add(job.Name, job.DependsOn.Count);
+                }
+            }
+        }
+        
+        public Job? StartNext()
+        {
+            if (!_readyQueue.TryDequeue(out var job)) return null;
+            _running.Add(job.Name);
+            return job;
+
+        }
+
+        public void Complete(Job job)
+        {
+            if (_running.Remove(job.Name))
+            {
+                _completedJobs.Add(job.Name);
+                var dependents = _jobs.GetDependents(job.Name);
+                foreach (var dependent in dependents)
+                {
+                    if (!_jobDegrees.TryGetValue(dependent.Name, out var value)) continue;
+                    _jobDegrees[dependent.Name] = --value;
+                    if (value != 0) continue;
+                    _jobDegrees.Remove(dependent.Name);
+                    _readyQueue.Enqueue(dependent);
+                }
+            }
+        }
+
+        public void Fail(Job job, Exception e)
+        {
+            if (_running.Remove(job.Name))
+            {
+                _failedJobs.Add(job.Name, e);
+            }
+        }
+
+        public IEnumerable<string> Unstarted()
+        {
+            return [.. _jobDegrees.Keys, .. _readyQueue.Select(j => j.Name)];
+        }
+
+        public ScheduleResult GetResult()
+        {
+            return new ScheduleResult(_completedJobs, _failedJobs, [.. Unstarted()]);
+        }
     }
 }
