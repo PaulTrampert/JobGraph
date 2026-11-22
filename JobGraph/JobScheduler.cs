@@ -122,8 +122,12 @@ public sealed class JobScheduler
                     if (done.Contains(dep.Name)) continue;
                     if (visiting.Contains(dep.Name))
                     {
-                        throw new DependencyCycleException($"Dependency cycle detected in {job.Name}: " +
-                                                           $"[{string.Join(", ", chain.Select(j => j.Item1.Name))}, {dep.Name}]");
+                        var cycle = chain.Select(j => j.Item1.Name)
+                            .Reverse()
+                            .SkipWhile(d => d != dep.Name)
+                            .Append(dep.Name);
+                        throw new DependencyCycleException($"Dependency cycle detected in {dep.Name}: " +
+                                                           $"[{string.Join(" -> ", cycle)}]");
                     }
 
                     visiting.Add(dep.Name);

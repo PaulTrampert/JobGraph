@@ -507,9 +507,12 @@ public class JobSchedulerTests
 
         var ex = await Assert.ThrowsAsync<DependencyCycleException>(() => Run(jobs));
 
-        var path = System.Text.RegularExpressions.Regex.Matches(ex!.Message, @"lead-in|cyc-[abc]")
+        var shown = $"Message: {ex!.Message}";
+        // The message names the job where the cycle was found, then the path in brackets; check the path.
+        var bracketed = System.Text.RegularExpressions.Regex.Match(ex.Message, @"\[(.*)\]");
+        Assert.That(bracketed.Success, Is.True, $"Expected the cycle path in [brackets]. {shown}");
+        var path = System.Text.RegularExpressions.Regex.Matches(bracketed.Groups[1].Value, @"lead-in|cyc-[abc]")
             .Select(m => m.Value).ToList();
-        var shown = $"Message: {ex.Message}";
 
         Assert.That(path, Does.Not.Contain("lead-in"), $"The path includes a job outside the cycle. {shown}");
         Assert.That(path, Has.Count.EqualTo(4), $"Expected the 3 cycle jobs plus the first one repeated. {shown}");
