@@ -1,27 +1,34 @@
 # Known issues
 
-Open items from code review of `JobGraph/JobScheduler.cs` (as of c86442e). Where a test can show
+Open items from code review of `JobGraph/JobScheduler.cs` (as of 0a6174e). Where a test can show
 an issue, the test is named under it. Those tests are in the "Edge cases found in code review"
 section of `JobGraph.Test/JobSchedulerTests.cs`. A test for an open bug fails until the bug is fixed.
 
-At c86442e the build has no warnings and all 28 tests pass.
+At 0a6174e the build has no warnings and all 28 tests pass.
 
-## 1. Tidying left over from the warnings fix
+## 1. `UnknownJobException` adds public API for a can't-happen case
+
+No test (unreachable).
+
+`GetByName` (`JobScheduler.cs:209`, from ddbf495) throws the new `UnknownJobException`. Its only
+caller passes a name taken from `Unstarted()`, which only holds names that are in the collection, so
+the throw can't happen. The exception is still `public`, which makes it part of the API even though
+no caller can ever catch it. The README says not to redesign the API yet. It also doesn't match the
+other two exceptions: they're `sealed` and expose the names as properties. Possible fixes:
+- make it `internal sealed`,
+- or drop it and use `_jobsByName[jobName]`, whose `KeyNotFoundException` is just as clear for a
+  "can't happen".
+
+## 2. Remaining tidying
 
 No test.
 
-- `TryGetByName`'s `out job!` (`JobScheduler.cs:200`) hides the nullable warning rather than
-  fixing it. `[MaybeNullWhen(false)] out Job job` says what actually happens. It would then warn at
-  line 62, where `failingJob` is used without checking the result, which is the real gap (it can't
-  be null there in practice, so an assertion or `!` at that call is the honest place for it).
-- `TreatWarningsAsErrors` isn't set in either csproj, so the warnings can come back unnoticed.
-- Trailing whitespace on lines 60, 73, 74, 87, 197 and 233. Line 87 is new in 711b883: a blank
-  line became whitespace-only.
-- `Unstarted()` is built twice in a row (lines 56 and 58), and there's a stray blank line before
-  the `}` of `StartNext` (line 239).
-- The comment at line 61 says a cycle must exist, but an unknown dependency also gets there.
+- `TreatWarningsAsErrors` still isn't set in either csproj, so the warnings can come back unnoticed.
+- The comment at line 65 still says a cycle must exist, but an unknown dependency also gets there.
+- `JobScheduler.cs` and `UnknownJobException.cs` have no newline at the end of the file
+  (`JobScheduler.cs` lost its trailing newline in the 0a6174e reformat).
 
-## 2. Cycle message repeats the job name
+## 3. Cycle message repeats the job name
 
 No test (cosmetic). The message is now
 `Dependency cycle detected in cyc-a: [cyc-a -> cyc-b -> cyc-c -> cyc-a]`. That's correct, but
@@ -30,7 +37,7 @@ cyc-c -> cyc-a` would say the same thing once. The README's Later list still has
 the cycle" as future work; that's done now apart from moving the names into a property of the
 exception rather than only the message.
 
-## 3. A job that ignores cancellation now holds up `RunAsync` (by design)
+## 4. A job that ignores cancellation now holds up `RunAsync` (by design)
 
 Test: `Cancelled_WaitsForRunningJobsBeforeThrowing` (passes).
 
@@ -40,7 +47,7 @@ runs. That's the right trade (callers can rely on nothing still running), but ne
 the `RunAsync` doc comment says `RunAsync` waits, so a caller can't know. One sentence in each would
 cover it.
 
-## 4. Cancellation at the very end discards a finished run (by design)
+## 5. Cancellation at the very end discards a finished run (by design)
 
 Test: `CancelledAfterEveryJobFinished_StillThrows_ByDesign` (passes; it pins the current behaviour).
 
@@ -51,6 +58,11 @@ the README's Later list would change it, and the test with it.
 
 ## Resolved
 
+- **Nullability of `TryGetByName` was hidden with `!`** (ddbf495). It now uses
+  `[MaybeNullWhen(false)]`, and the validation fallback calls the new `GetByName` instead of
+  ignoring `TryGetByName`'s result. See issue 1 for the exception `GetByName` throws.
+- **Tidying** (ddbf495, 0a6174e). `Unstarted()` is built once, the trailing whitespace and the
+  stray blank line in `StartNext` are gone, and the file has been reformatted.
 - **`RunAsync` threw while jobs were still running** (711b883). On cancellation it stopped reading
   completions and returned while started jobs carried on. It now stops starting jobs, keeps draining
   completions until none are running, then throws. Test: `Cancelled_WaitsForRunningJobsBeforeThrowing`.
@@ -58,7 +70,7 @@ the README's Later list would change it, and the test with it.
   in dependency order, starts and ends at the repeated job, and leaves out the jobs leading into the
   cycle. Test: `CycleMessage_NamesJustTheCycle_InOrder`.
 - **Compiler warnings** (c86442e). Both nullable warnings are gone and the unused
-  `System.Collections.Immutable` using is removed. See issue 1 for what's left.
+  `System.Collections.Immutable` using is removed.
 - **Cancellation could make `RunAsync` return normally instead of throwing** (0bc0dd9). If
   cancellation arrived after the last running job's result was read, the loop broke out and
   returned, reporting never-started jobs as `Skipped`. Fixed by throwing if cancellation was
