@@ -54,11 +54,10 @@ public sealed class JobScheduler
             scheduleValidation.Complete(job);
         }
 
-        if (scheduleValidation.Unstarted().Any())
+        var unstarted = scheduleValidation.Unstarted().FirstOrDefault();
+        if (unstarted != null)
         {
-            var failingJobName = scheduleValidation.Unstarted().First();
-            jobCollection.TryGetByName(failingJobName, out var failingJob);
-            
+            var failingJob = jobCollection.GetByName(unstarted);
             // This should always throw, if we get here a cycle must exist
             CheckCycles(failingJob, jobCollection);
             throw new Exception("An unknown scheduling error occurred");
@@ -199,6 +198,13 @@ public sealed class JobScheduler
         public bool TryGetByName(string jobName, [MaybeNullWhen(false)] out Job job)
         {
             return _jobsByName.TryGetValue(jobName, out job);
+        }
+
+        public Job GetByName(string jobName)
+        {
+            return !TryGetByName(jobName, out var result) 
+                ? throw new UnknownJobException(jobName) 
+                : result;
         }
     }
 
