@@ -61,6 +61,7 @@ public sealed class JobScheduler
             
             // This should always throw, if we get here a cycle must exist
             CheckCycles(failingJob, jobCollection);
+            throw new Exception("An unknown scheduling error occurred");
         }
 
         var runState = new SchedulingState(jobCollection);
