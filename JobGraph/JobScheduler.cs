@@ -5,43 +5,47 @@ using System.Threading.Channels;
 namespace JobGraph;
 
 /// <summary>
-/// Runs a graph of jobs, each as soon as everything it depends on has completed,
-/// with independent jobs running concurrently.
+///     Runs a graph of jobs, each as soon as everything it depends on has completed,
+///     with independent jobs running concurrently.
 /// </summary>
 public sealed class JobScheduler
 {
     /// <param name="maxConcurrency">
-    /// Most jobs allowed to be running at once. Must be at least 1
-    /// (<see cref="ArgumentOutOfRangeException"/> otherwise).
+    ///     Most jobs allowed to be running at once. Must be at least 1
+    ///     (<see cref="ArgumentOutOfRangeException" /> otherwise).
     /// </param>
     public JobScheduler(int maxConcurrency = int.MaxValue)
     {
         if (maxConcurrency < 1)
-        {
             throw new ArgumentOutOfRangeException(
                 nameof(maxConcurrency),
                 $"{nameof(maxConcurrency)} must be greater than 0");
-        }
         MaxConcurrency = maxConcurrency;
     }
 
     public int MaxConcurrency { get; }
 
     /// <summary>
-    /// Validates the graph, then runs it.
-    /// <list type="bullet">
-    /// <item>Validation happens before any job starts; if it fails, nothing runs.
-    ///   Duplicate names: <see cref="ArgumentException"/>. A dependency not in the graph:
-    ///   <see cref="UnknownDependencyException"/>. A cycle, including a job depending on itself:
-    ///   <see cref="DependencyCycleException"/>.</item>
-    /// <item>Each job runs exactly once, and only after all its dependencies completed.</item>
-    /// <item>A job starts as soon as its own dependencies are done, not when a whole "wave" is done.</item>
-    /// <item>No more than <see cref="MaxConcurrency"/> jobs run at once.</item>
-    /// <item>A job that throws is reported in <see cref="ScheduleResult.Failed"/>; everything downstream of
-    ///   it is skipped; unrelated jobs carry on. Job failures do not make this method throw.</item>
-    /// <item>Jobs receive a token that is cancelled when <paramref name="cancellationToken"/> is. Once it is
-    ///   cancelled, no new job starts, and this method throws <see cref="OperationCanceledException"/>.</item>
-    /// </list>
+    ///     Validates the graph, then runs it.
+    ///     <list type="bullet">
+    ///         <item>
+    ///             Validation happens before any job starts; if it fails, nothing runs.
+    ///             Duplicate names: <see cref="ArgumentException" />. A dependency not in the graph:
+    ///             <see cref="UnknownDependencyException" />. A cycle, including a job depending on itself:
+    ///             <see cref="DependencyCycleException" />.
+    ///         </item>
+    ///         <item>Each job runs exactly once, and only after all its dependencies completed.</item>
+    ///         <item>A job starts as soon as its own dependencies are done, not when a whole "wave" is done.</item>
+    ///         <item>No more than <see cref="MaxConcurrency" /> jobs run at once.</item>
+    ///         <item>
+    ///             A job that throws is reported in <see cref="ScheduleResult.Failed" />; everything downstream of
+    ///             it is skipped; unrelated jobs carry on. Job failures do not make this method throw.
+    ///         </item>
+    ///         <item>
+    ///             Jobs receive a token that is cancelled when <paramref name="cancellationToken" /> is. Once it is
+    ///             cancelled, no new job starts, and this method throws <see cref="OperationCanceledException" />.
+    ///         </item>
+    ///     </list>
     /// </summary>
     public async Task<ScheduleResult> RunAsync(IEnumerable<Job> jobs, CancellationToken cancellationToken = default)
     {
@@ -70,8 +74,8 @@ public sealed class JobScheduler
 
         while (!runState.Done)
         {
-            while (!cancellationToken.IsCancellationRequested 
-                   && runState.NumRunning < MaxConcurrency 
+            while (!cancellationToken.IsCancellationRequested
+                   && runState.NumRunning < MaxConcurrency
                    && runState.HasNext)
             {
                 var toStart = runState.StartNext()!;
@@ -84,12 +88,13 @@ public sealed class JobScheduler
             if (exception != null) runState.Fail(doneJob, exception);
             else runState.Complete(doneJob);
         }
-        
+
         cancellationToken.ThrowIfCancellationRequested();
         return runState.GetResult();
     }
 
-    private static async Task RunJob(Job job, ChannelWriter<(Job, Exception?)> resultWriter, CancellationToken cancellationToken)
+    private static async Task RunJob(Job job, ChannelWriter<(Job, Exception?)> resultWriter,
+        CancellationToken cancellationToken)
     {
         Exception? exception = null;
         try
@@ -156,8 +161,8 @@ public sealed class JobScheduler
     private class JobCollection : IEnumerable<Job>
     {
         private readonly IReadOnlyList<Job> _jobs;
-        private readonly IReadOnlyDictionary<string, Job> _jobsByName;
         private readonly IReadOnlyDictionary<string, IReadOnlyList<string>> _jobsByDependency;
+        private readonly IReadOnlyDictionary<string, Job> _jobsByName;
 
         public JobCollection(IEnumerable<Job> jobs)
         {
@@ -170,14 +175,23 @@ public sealed class JobScheduler
                 foreach (var dep in job.DependsOn)
                 {
                     if (!jobsByDependency.TryGetValue(dep, out var dependents))
-                    {
                         jobsByDependency.Add(dep, dependents = []);
-                    }
                     dependents.Add(job.Name);
                 }
             }
+
             _jobsByName = jobsByName;
             _jobsByDependency = jobsByDependency.ToDictionary(kv => kv.Key, IReadOnlyList<string> (kv) => kv.Value);
+        }
+
+        public IEnumerator<Job> GetEnumerator()
+        {
+            return _jobs.GetEnumerator();
+        }
+
+        IEnumerator IEnumerable.GetEnumerator()
+        {
+            return GetEnumerator();
         }
 
         public IEnumerable<Job> GetDependents(string jobName)
@@ -187,14 +201,6 @@ public sealed class JobScheduler
             return dependents.Select(d => _jobsByName[d]);
         }
 
-        public IEnumerator<Job> GetEnumerator() =>
-            _jobs.GetEnumerator();
-
-        IEnumerator IEnumerable.GetEnumerator()
-        {
-            return GetEnumerator();
-        }
-        
         public bool TryGetByName(string jobName, [MaybeNullWhen(false)] out Job job)
         {
             return _jobsByName.TryGetValue(jobName, out job);
@@ -202,48 +208,41 @@ public sealed class JobScheduler
 
         public Job GetByName(string jobName)
         {
-            return !TryGetByName(jobName, out var result) 
-                ? throw new UnknownJobException(jobName) 
+            return !TryGetByName(jobName, out var result)
+                ? throw new UnknownJobException(jobName)
                 : result;
         }
     }
 
     private class SchedulingState
     {
-        private readonly JobCollection _jobs;
-        private readonly Dictionary<string, int> _jobDegrees = new();
-        private readonly HashSet<string> _running = new();
-        private readonly Queue<Job> _readyQueue = new();
         private readonly HashSet<string> _completedJobs = new();
         private readonly Dictionary<string, Exception> _failedJobs = new();
+        private readonly Dictionary<string, int> _jobDegrees = new();
+        private readonly JobCollection _jobs;
+        private readonly Queue<Job> _readyQueue = new();
+        private readonly HashSet<string> _running = new();
+
+        public SchedulingState(JobCollection jobs)
+        {
+            _jobs = jobs;
+            foreach (var job in _jobs)
+                if (job.DependsOn.Count == 0)
+                    _readyQueue.Enqueue(job);
+                else
+                    _jobDegrees.Add(job.Name, job.DependsOn.Count);
+        }
 
         public bool HasNext => _readyQueue.Count > 0;
         public int NumRunning => _running.Count;
 
         public bool Done => _readyQueue.Count == 0 && _running.Count == 0;
 
-        public SchedulingState(JobCollection jobs)
-        {
-            _jobs = jobs;
-            foreach (var job in _jobs)
-            {
-                if (job.DependsOn.Count == 0)
-                {
-                    _readyQueue.Enqueue(job);
-                }
-                else
-                {
-                    _jobDegrees.Add(job.Name, job.DependsOn.Count);
-                }
-            }
-        }
-        
         public Job? StartNext()
         {
             if (!_readyQueue.TryDequeue(out var job)) return null;
             _running.Add(job.Name);
             return job;
-
         }
 
         public void Complete(Job job)
@@ -265,10 +264,7 @@ public sealed class JobScheduler
 
         public void Fail(Job job, Exception e)
         {
-            if (_running.Remove(job.Name))
-            {
-                _failedJobs.Add(job.Name, e);
-            }
+            if (_running.Remove(job.Name)) _failedJobs.Add(job.Name, e);
         }
 
         public IEnumerable<string> Unstarted()
