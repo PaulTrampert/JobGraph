@@ -425,4 +425,113 @@ public class JobSchedulerTests
             await run;
         });
     }
+
+    // ---------------------------------------------------------------------------------------
+    // Edge cases found in code review (see KNOWN_ISSUES.md).
+    // ---------------------------------------------------------------------------------------
+
+    [Test]
+    public async Task CancelledJustAfterTheLastRunningJobFinishes_StillThrows()
+    {
+        // A asks for cancellation from a background task just as it finishes, so the cancellation
+        // lands at different points around the scheduler reading A's result. It's a race, so try
+        // it many times. Either RunAsync throws, or the cancellation came after RunAsync finished
+        // and both jobs completed. Returning with B not run is the bug.
+        for (var i = 0; i < 500; i++)
+        {
+            using var cts = new CancellationTokenSource();
+            Task cancelling = Task.CompletedTask;
+            Job[] jobs =
+            [
+                new("A", [], _ =>
+                {
+                    cancelling = Task.Run(async () => { await Task.Yield(); cts.Cancel(); });
+                    return Task.CompletedTask;
+                }),
+                new("B", ["A"], _ => Task.CompletedTask),
+            ];
+
+            ScheduleResult? result = null;
+            try
+            {
+                result = await Run(jobs, ct: cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            await cancelling;
+
+            if (result != null)
+            {
+                Assert.That(result.Completed, Is.EquivalentTo(new[] { "A", "B" }),
+                    $"Run {i}: RunAsync returned after cancellation instead of throwing. " +
+                    $"Skipped: [{string.Join(", ", result.Skipped)}]");
+            }
+        }
+    }
+
+    [Test]
+    public async Task Cancelled_WaitsForRunningJobsBeforeThrowing()
+    {
+        // A ignores the token and takes a while to finish after the cancellation. RunAsync
+        // shouldn't finish (by throwing) while A is still running.
+        using var cts = new CancellationTokenSource();
+        var started = new Gate("A started");
+
+        var run = Run([_rec.Job("A", async _ =>
+        {
+            started.Open();
+            await Task.Delay(200, CancellationToken.None);
+        })], ct: cts.Token);
+
+        await started.WaitAsync("the test");
+        cts.Cancel();
+        await Assert.CatchAsync<OperationCanceledException>(() => run);
+
+        Assert.That(_rec.Events, Does.Contain("end:A"), "RunAsync threw while A was still running");
+    }
+
+    [Test]
+    public async Task CycleMessage_NamesJustTheCycle_InOrder()
+    {
+        // cyc-a → cyc-b → cyc-c → cyc-a, with lead-in depending on the cycle but not part of it.
+        // Distinctive names so they can be picked out of the message whatever its format.
+        Job[] jobs =
+        [
+            _rec.Job("lead-in", "cyc-a"),
+            _rec.Job("cyc-a", "cyc-b"),
+            _rec.Job("cyc-b", "cyc-c"),
+            _rec.Job("cyc-c", "cyc-a"),
+        ];
+        var deps = jobs.ToDictionary(j => j.Name, j => j.DependsOn);
+
+        var ex = await Assert.ThrowsAsync<DependencyCycleException>(() => Run(jobs));
+
+        var path = System.Text.RegularExpressions.Regex.Matches(ex!.Message, @"lead-in|cyc-[abc]")
+            .Select(m => m.Value).ToList();
+        var shown = $"Message: {ex.Message}";
+
+        Assert.That(path, Does.Not.Contain("lead-in"), $"The path includes a job outside the cycle. {shown}");
+        Assert.That(path, Has.Count.EqualTo(4), $"Expected the 3 cycle jobs plus the first one repeated. {shown}");
+        Assert.That(path[^1], Is.EqualTo(path[0]), $"The path should end where it starts. {shown}");
+
+        // Either direction is fine (depends-on or depended-on-by), as long as it's consistent.
+        var pairs = path.Zip(path.Skip(1)).ToList();
+        var forwards = pairs.All(p => deps[p.First].Contains(p.Second));
+        var backwards = pairs.All(p => deps[p.Second].Contains(p.First));
+        Assert.That(forwards || backwards, Is.True, $"Consecutive jobs in the path aren't linked by dependencies. {shown}");
+    }
+
+    [Test]
+    public async Task CancelledAfterEveryJobFinished_StillThrows_ByDesign()
+    {
+        // Not a bug: pins the README's rule that a cancelled run throws, even when nothing was left
+        // to do. "Cancellation returns what had finished" (README, Later) would change this test.
+        using var cts = new CancellationTokenSource();
+
+        await Assert.CatchAsync<OperationCanceledException>(() => Run(
+            [_rec.Job("A", _ => { cts.Cancel(); return Task.CompletedTask; })], ct: cts.Token));
+
+        Assert.That(_rec.Events, Does.Contain("end:A"));
+    }
 }
