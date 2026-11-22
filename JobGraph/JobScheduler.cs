@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Diagnostics.CodeAnalysis;
 using System.Threading.Channels;
 
 namespace JobGraph;
@@ -195,9 +196,9 @@ public sealed class JobScheduler
             return GetEnumerator();
         }
         
-        public bool TryGetByName(string jobName, out Job job)
+        public bool TryGetByName(string jobName, [MaybeNullWhen(false)] out Job job)
         {
-            return _jobsByName.TryGetValue(jobName, out job!);
+            return _jobsByName.TryGetValue(jobName, out job);
         }
     }
 
