@@ -86,6 +86,7 @@ public sealed class JobScheduler
             else runState.Complete(doneJob);
         }
 
+        cancellationToken.ThrowIfCancellationRequested();
         return runState.GetResult();
     }
 
