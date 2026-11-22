@@ -1,48 +1,44 @@
 # Known issues
 
-Open items from code review of `JobGraph/JobScheduler.cs` (as of 0bc0dd9). Where a test can show
+Open items from code review of `JobGraph/JobScheduler.cs` (as of c86442e). Where a test can show
 an issue, the test is named under it. Those tests are in the "Edge cases found in code review"
-section of `JobGraph.Test/JobSchedulerTests.cs`, and they fail until the issue is fixed.
+section of `JobGraph.Test/JobSchedulerTests.cs`. A test for an open bug fails until the bug is fixed.
 
-## 1. `RunAsync` throws while jobs are still running
+At c86442e the build has no warnings and all 28 tests pass.
 
-Test: `Cancelled_WaitsForRunningJobsBeforeThrowing` (fails).
+## 1. Tidying left over from the warnings fix
 
-On cancellation, `completions.Reader.ReadAsync(cancellationToken)` throws straight away, so
-`RunAsync` exits while started jobs are still running. Their results go into a channel nobody reads.
-The README doesn't say whether `RunAsync` waits for running jobs, so this may be acceptable. But a
-caller (e.g. PacmanManager cleaning up a build directory) would reasonably assume nothing is still
-running once `RunAsync` has finished. If you decide not waiting is fine, delete the test.
+No test.
 
-Fix, if wanted: on cancellation, stop starting jobs but keep draining `completions` (with
-`CancellationToken.None`) until `NumRunning == 0`, then throw.
+- `TryGetByName`'s `out job!` (`JobScheduler.cs:200`) hides the nullable warning rather than
+  fixing it. `[MaybeNullWhen(false)] out Job job` says what actually happens. It would then warn at
+  line 62, where `failingJob` is used without checking the result, which is the real gap (it can't
+  be null there in practice, so an assertion or `!` at that call is the honest place for it).
+- `TreatWarningsAsErrors` isn't set in either csproj, so the warnings can come back unnoticed.
+- Trailing whitespace on lines 60, 73, 74, 87, 197 and 233. Line 87 is new in 711b883: a blank
+  line became whitespace-only.
+- `Unstarted()` is built twice in a row (lines 56 and 58), and there's a stray blank line before
+  the `}` of `StartNext` (line 239).
+- The comment at line 61 says a cycle must exist, but an unknown dependency also gets there.
 
-## 2. Cycle exception message
+## 2. Cycle message repeats the job name
 
-Test: `CycleMessage_NamesJustTheCycle_InOrder` (fails). Currently, for
-lead-in → cyc-a → cyc-b → cyc-c → cyc-a, the message is
-`Dependency cycle detected in lead-in: [cyc-c, cyc-b, cyc-a, lead-in, cyc-a]`.
+No test (cosmetic). The message is now
+`Dependency cycle detected in cyc-a: [cyc-a -> cyc-b -> cyc-c -> cyc-a]`. That's correct, but
+"detected in cyc-a" just repeats the first entry of the path. `Dependency cycle: cyc-a -> cyc-b ->
+cyc-c -> cyc-a` would say the same thing once. The README's Later list still has "names the jobs in
+the cycle" as future work; that's done now apart from moving the names into a property of the
+exception rather than only the message.
 
-- `chain` is a `Stack`, and enumerating a `Stack` goes top-first, so the path prints **backwards**
-  with the repeated job in the wrong place. `chain.Reverse()` (or building the list bottom-up)
-  fixes the order.
-- It includes the jobs leading *into* the cycle, not just the ones in it, and "detected in
-  {job.Name}" names the starting job, which may not be part of the cycle. Trimming the path to start
-  at `dep.Name` gives just the cycle, which gets most of the way to the "foo-git → bar → foo-git"
-  message in the README's Later list.
+## 3. A job that ignores cancellation now holds up `RunAsync` (by design)
 
-## 3. Compiler warnings and tidying
+Test: `Cancelled_WaitsForRunningJobsBeforeThrowing` (passes).
 
-No test. `TreatWarningsAsErrors` in the csproj would stop the warnings coming back.
-
-- Two nullable warnings:
-  - `JobScheduler.cs:54`: `StartNext()` returns `Job?`, and the result is passed to `Complete(Job)`.
-  - `JobScheduler.cs:195`: `TryGetByName`'s `out Job` needs `[MaybeNullWhen(false)]`.
-- `using System.Collections.Immutable;` is unused.
-- Trailing whitespace on lines 61, 74, 75, 192 and 228.
-- `Unstarted()` is built twice in a row (lines 57 and 59), and there's a stray blank line before
-  the `}` of `StartNext`.
-- The comment at line 62 says a cycle must exist, but an unknown dependency also gets there.
+Since 711b883, `RunAsync` waits for running jobs before throwing `OperationCanceledException`. The
+flip side is that a job that ignores its token keeps `RunAsync` from returning for as long as it
+runs. That's the right trade (callers can rely on nothing still running), but neither the README nor
+the `RunAsync` doc comment says `RunAsync` waits, so a caller can't know. One sentence in each would
+cover it.
 
 ## 4. Cancellation at the very end discards a finished run (by design)
 
@@ -55,6 +51,14 @@ the README's Later list would change it, and the test with it.
 
 ## Resolved
 
+- **`RunAsync` threw while jobs were still running** (711b883). On cancellation it stopped reading
+  completions and returned while started jobs carried on. It now stops starting jobs, keeps draining
+  completions until none are running, then throws. Test: `Cancelled_WaitsForRunningJobsBeforeThrowing`.
+- **Cycle message was backwards and included jobs outside the cycle** (8faf3c5). The path now runs
+  in dependency order, starts and ends at the repeated job, and leaves out the jobs leading into the
+  cycle. Test: `CycleMessage_NamesJustTheCycle_InOrder`.
+- **Compiler warnings** (c86442e). Both nullable warnings are gone and the unused
+  `System.Collections.Immutable` using is removed. See issue 1 for what's left.
 - **Cancellation could make `RunAsync` return normally instead of throwing** (0bc0dd9). If
   cancellation arrived after the last running job's result was read, the loop broke out and
   returned, reporting never-started jobs as `Skipped`. Fixed by throwing if cancellation was
