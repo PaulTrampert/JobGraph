@@ -81,11 +81,11 @@ public sealed class JobScheduler
 
             if (runState.NumRunning == 0) break;
 
-            var (doneJob, exception) = await completions.Reader.ReadAsync(cancellationToken);
+            var (doneJob, exception) = await completions.Reader.ReadAsync(CancellationToken.None);
             if (exception != null) runState.Fail(doneJob, exception);
             else runState.Complete(doneJob);
         }
-
+        
         cancellationToken.ThrowIfCancellationRequested();
         return runState.GetResult();
     }
