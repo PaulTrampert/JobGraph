@@ -1,5 +1,4 @@
 using System.Collections;
-using System.Collections.Immutable;
 using System.Threading.Channels;
 
 namespace JobGraph;
@@ -50,7 +49,7 @@ public sealed class JobScheduler
         while (scheduleValidation.HasNext)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var job = scheduleValidation.StartNext();
+            var job = scheduleValidation.StartNext()!;
             scheduleValidation.Complete(job);
         }
 
@@ -109,6 +108,7 @@ public sealed class JobScheduler
     {
         var visiting = new HashSet<string>([job.Name]);
         var done = new HashSet<string>();
+        // ReSharper disable once GenericEnumeratorNotDisposed
         var chain = new Stack<(Job, IEnumerator<string>)>([(job, job.DependsOn.GetEnumerator())]);
         try
         {
@@ -131,6 +131,7 @@ public sealed class JobScheduler
                     }
 
                     visiting.Add(dep.Name);
+                    // ReSharper disable once GenericEnumeratorNotDisposed
                     chain.Push((dep, dep.DependsOn.GetEnumerator()));
                 }
                 else
@@ -196,7 +197,7 @@ public sealed class JobScheduler
         
         public bool TryGetByName(string jobName, out Job job)
         {
-            return _jobsByName.TryGetValue(jobName, out job);
+            return _jobsByName.TryGetValue(jobName, out job!);
         }
     }
 
